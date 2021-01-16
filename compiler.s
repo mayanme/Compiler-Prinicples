@@ -167,12 +167,13 @@
 %define MAKE_LITERAL_FLOAT(val) MAKE_LITERAL T_FLOAT, dq val
 %define MAKE_LITERAL_SYMBOL(val) MAKE_LITERAL T_SYMBOL, dq val
 
-%macro MAKE_LITERAL_STRING 1
-	db T_STRING
-	dq (%%end_str- %%str)
-%%str:
-	db %1
-%%end_str:
+%macro MAKE_LITERAL_STRING 0-*
+db T_STRING
+dq %0
+%rep %0
+db %1
+%rotate 1
+%endrep
 %endmacro
 	
 ;;; Macros and routines for printing Scheme OBjects to STDOUT

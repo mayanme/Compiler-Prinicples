@@ -86,6 +86,12 @@ module Code_Gen : CODE_GEN = struct
     let address = (fun (_,(addr,_)) -> addr) tuple in
     "const_tbl+" ^ (string_of_int address)
 
+  let string_to_ascii_list str =
+    let chars = string_to_list str in
+    let asciis = List.map Char.code chars in
+    let ascii_strs = List.map (Printf.sprintf "%d") asciis in
+    String.concat ", " ascii_strs
+
   (* Generate tuples for all types of consts, increment address everytime and catenate result to END OF tuple_list *)
   let make_const_tuple (address, tuple_list) const = match const with
   | Void -> (address + 1,tuple_list @ [(const,(address,"MAKE_VOID"))])
@@ -95,7 +101,7 @@ module Code_Gen : CODE_GEN = struct
   | Sexpr(Number(Fraction (n,d))) -> (address + 17, tuple_list @ [(const,(address,String.concat "" ["MAKE_LITERAL_RATIONAL(";(string_of_int n);",";(string_of_int d);")"]))])
   | Sexpr(Number(Float n)) -> (address + 9, tuple_list @ [(const,(address,String.concat "" ["MAKE_LITERAL_FLOAT(";(string_of_float n);")"]))])
   | Sexpr(Char ch) -> (address + 2, tuple_list @ [(const,(address,String.concat "" ["MAKE_LITERAL_CHAR(";(string_of_int(int_of_char ch));")"]))])
-  | Sexpr(String(s)) -> (address + 9 + (String.length s), tuple_list @ [(const,(address,String.concat "" ["MAKE_LITERAL_STRING \"";s; "\""]))])
+  | Sexpr(String(s)) -> (address + 9 + (String.length s), tuple_list @ [(const,(address, "MAKE_LITERAL_STRING " ^ (string_to_ascii_list s)))])
   | Sexpr(Symbol s) ->
     let make_symbol = String.concat "" ["MAKE_LITERAL_SYMBOL(";(get_const_address tuple_list (Sexpr(String s)));")"] in
       (address + 9, tuple_list @ [(const,(address,make_symbol))])
@@ -140,6 +146,7 @@ module Code_Gen : CODE_GEN = struct
 
 
   let counter = ref 0
+  let print = Printf.sprintf;;
   
   let rec code_gen consts fvars e env_size = match e with
   | Const'(const) -> "mov rax, " ^ (get_const_address consts const)
@@ -183,7 +190,7 @@ module Code_Gen : CODE_GEN = struct
       let counter_string = (string_of_int !counter) in
       let values_generated = (List.map (fun value -> (code_gen consts fvars value env_size)) seq) in
       let string_to_concat = 
-        "cmp rax, SOB_FALSE_ADDRESS\n 
+        "\ncmp rax, SOB_FALSE_ADDRESS\n 
        jne Lexit" ^ counter_string ^ "\n" in
       (String.concat string_to_concat values_generated) 
        ^ "\nLexit" ^ counter_string ^ ":"
@@ -258,8 +265,6 @@ module Code_Gen : CODE_GEN = struct
     pop rbx       ; pop number of arguments to rbx (can't be sure we returned with same number)
     shl rbx, 3    ; rbx = rbx * 8
     add rsp, rbx  ; pop arguments
-    cmp qword [rsp], SOB_NIL_ADDRESS
-    jne no_magic_on_stack" ^ counter_string ^ "
     add rsp, 8    ; pop SOB_NIL_ADDRESS pushed in the beginning
     no_magic_on_stack" ^ counter_string ^ ":
     ;********END OF APPLIC***************"
@@ -289,10 +294,12 @@ module Code_Gen : CODE_GEN = struct
     end_of_loop" ^ counter_string ^ ":
     mov rdi, rbx                                                         ; rdi = back to ext env array[0]
     mov rsi, NUM_OF_ARGS                                                 ; rsi = number of arguments of the calling lambda
+    inc rsi                                                              ; rsi ++ so we copy MAGIC as well
     shl rsi, 3                                                              ; rsi = rsi * WORD_SIZE
     MALLOC rbx, rsi                                                      ; rbx = array for the parameters of the calling lambda
     mov qword [rdi], rbx                                                 ; rdi[0] = rbx
     mov rcx, NUM_OF_ARGS                                                 ; rcx = number of arguments of the calling lambda (copy from 0 to n so we copy magic as well)
+    inc rcx
     
     copy_parameters_loop" ^ counter_string ^ ":
     cmp rcx, -1
@@ -340,10 +347,12 @@ module Code_Gen : CODE_GEN = struct
     end_of_loop" ^ counter_string ^ ":
     mov rdi, rbx                                                         ; rdi = back to ext env array[0]
     mov rsi, NUM_OF_ARGS                                                 ; rsi = number of arguments of the calling lambda
+    inc rsi
     shl rsi, 3                                                              ; rsi = rsi * WORD_SIZE
     MALLOC rbx, rsi                                                      ; rbx = array for the parameters of the calling lambda
     mov qword [rdi], rbx                                                 ; rdi[0] = rbx
     mov rcx, NUM_OF_ARGS                                                 ; rcx = number of arguments of the calling lambda (copy from 0 to n so we copy magic as well)
+    inc rcx
     
     copy_parameters_loop" ^ counter_string ^ ":
     cmp rcx, -1
@@ -367,12 +376,12 @@ module Code_Gen : CODE_GEN = struct
     
     mov rax, NUM_OF_ARGS_WITH_RSP
     sub rax, " ^ (string_of_int required_num_of_params) ^ "             ; rax = number of args to put in the opt list
-    cmp rax, 0                                                          ; base case - only required args, no need to adjust (just change NUM_OF_ARGS)
-    je change_num_of_args" ^ counter_string ^ "
-    mov rbx, NUM_OF_ARGS_WITH_RSP
-    add rbx, 3
+    cmp rax, 0                                                          ; base case - only required args, no need to adjust
+    je dont_do_anything" ^ counter_string ^ "
+    mov rbx, NUM_OF_ARGS_WITH_RSP                                       ; rbx = n
+    add rbx, 3                                                          ; rbx = n + 3
     shl rbx, 3
-    add rbx, rsp                                                       ; rbx = rsp +(3+rbx)*WORD_SIZE -> rbx = address of MAGIC (Nil)
+    add rbx, rsp                                                       ; rbx = rsp +(3+n)*WORD_SIZE -> rbx = address of MAGIC (Nil)
     mov rcx, SOB_NIL_ADDRESS                                            ; rcx = Nil, during the loop rcx will hold the address of the last pair created
 
     make_optional_args_list_loop" ^ counter_string ^ ":
@@ -419,7 +428,8 @@ module Code_Gen : CODE_GEN = struct
 
     change_num_of_args" ^ counter_string ^ ":
     mov NUM_OF_ARGS_WITH_RSP, " ^ (string_of_int expected_num_of_params) ^ "
-        
+    
+    dont_do_anything" ^ counter_string ^ ":
     push rbp,
     mov rbp, rsp
     " ^ gen_body ^ "
@@ -433,56 +443,53 @@ module Code_Gen : CODE_GEN = struct
     let evaluated_reversed_args = (List.rev (List.map (fun value -> (code_gen consts fvars value env_size)) args)) in
     let push_all_args = (String.concat "" (List.map (fun argument -> argument ^ "\npush rax\n") evaluated_reversed_args)) in
     let n = (List.length args) in
-    let size_of_new_frame = n+5 in
+    let size_of_new_frame = n+4 in
     let evaluated_proc = (code_gen consts fvars proc env_size) in
     ";********APPLIC TP***************\n
-    push SOB_NIL_ADDRESS\n"
-    ^ push_all_args ^"
-    pushed_args" ^ counter_string ^ ":
-    push " ^ (string_of_int n) ^ "\n"
-    ^ evaluated_proc ^ "\n
-    evaluated_proc" ^ counter_string ^ ":
+    testC" ^ counter_string ^ ":
+    push SOB_NIL_ADDRESS\n
+    testB" ^ counter_string ^ ":\n"
+    ^ push_all_args ^ "
+    testA" ^ counter_string ^ ":
+    push " ^ (string_of_int n) ^ "\n" ^
+    evaluated_proc ^ "\n
     TYPE rbx, rax
-    check_type" ^ counter_string ^ ":
     cmp rbx, T_CLOSURE
-    compare_closure" ^ counter_string ^ ":
     je LContinueApplic" ^ counter_string ^ "
-    exiting_error" ^ counter_string ^ ":
     mov rax, 60
     syscall
     LContinueApplic" ^ counter_string ^ ":
     CLOSURE_ENV rbx, rax
     push rbx
-    CLOSURE_CODE rbx, rax                       ; assume rax still holds the closure for this lambda
+    CLOSURE_CODE rbx, rax
 
     push qword [rbp + WORD_SIZE]                          ; rbp is still old rbp (of the calling lambda) and rbp+8 is the old ret address
-    push qword [rbp]                                      ; [rbp] is rbp in f -> the stack frame pointer we will return to when we return from h
+    mov r12, qword [rbp]                                      ; [rbp] is rbp in f -> the stack frame pointer we will return to when we return from h
     
     mov rcx, " ^ (string_of_int size_of_new_frame) ^ "    ; rcx = size of new frame
     mov rax, NUM_OF_ARGS 
     add rax, 5                                            ; rax = size of old frame
+    mov r11, rax                                            ; r11 = back up for old frame size
+    mov rsi, 1                                             ; rsi counts from 1 to rcx = new frame size
 
-    mov rdx, rcx
-    sub rdx, rax                                          ; new frame size - old frame size
-    mov rsi, 1
-    copy_stack_applictp_loop" ^ counter_string ^ ":
+    copy_stack_applictp_loop" ^ counter_string ^ ":         ; this loop will run rcx times = new frame size times
     cmp rcx, 0
     je end_of_copy_stack_applictp_loop" ^ counter_string ^ "
     dec rax
-    neg rsi
-    mov rdi, qword[rbp + rsi*WORD_SIZE]
-    neg rsi
-    mov qword[rbp + WORD_SIZE*rax], rdi
+    mov r9, rsi
+    neg r9
+    mov rdi, qword [rbp + r9*WORD_SIZE]
+    mov qword [rbp + rax*WORD_SIZE], rdi
     inc rsi
     dec rcx
     jmp copy_stack_applictp_loop" ^ counter_string ^ "
     end_of_copy_stack_applictp_loop" ^ counter_string ^ ":
-    mov rax, WORD_SIZE
-    mul rdx
-    mov rsp,rbp
-    sub rsp, rax
-    pop rbp
     
+    mov rax, r11                ; restore size of old frame
+    shl rax, 3
+    add rsp, rax
+    
+    mov rbp, r12
     jmp rbx                       ; assumes rbx still holds the code of the closure
     ;********END OF APPLIC TP***************"
 

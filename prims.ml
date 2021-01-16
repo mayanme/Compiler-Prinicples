@@ -56,6 +56,8 @@ module Prims : PRIMS = struct
      The argument register assignment follows the x86 64bit Unix ABI, because there needs to be *some*
      kind of consistency, so why not just use the standard ABI.
      See page 22 in https://raw.githubusercontent.com/wiki/hjl-tools/x86-psABI/x86-64-psABI-1.0.pdf
+
+     *** FIXME: There's a typo here: PVAR(0) should be rdi, PVAR(1) should be rsi, according to the ABI     
    *)
   let make_unary label body = make_routine label ("mov rsi, PVAR(0)\n\t" ^ body);;
   let make_binary label body = make_unary label ("mov rdi, PVAR(1)\n\t" ^ body);;
@@ -83,6 +85,30 @@ module Prims : PRIMS = struct
       make_unary (name ^ "?")
         (return_boolean_eq ("mov sil, byte [rsi]\n\tcmp sil, " ^ type_tag)) in
     String.concat "\n\n" (List.map (fun (a, b) -> single_query a b) queries_to_types);;
+
+  (* The rational number artihmetic operators have to normalize the fractions they return,
+     so a GCD implementation is needed. Now there are two options: 
+     1) implement only a scheme-procedure-like GCD, and allocate rational number scheme objects for the 
+        intermediate numerator and denominator values of the fraction to be returned, call GCD, decompose
+        the returned fraction, perform the divisions, and allocate the final fraction to return
+     2) implement 2 GCDs: a low-level gcd that only implements the basic GCD loop, which is used by the rational 
+        number arithmetic operations; and a scheme-procedure-like GCD to be wrapped by the stdlib GCD implementation.
+    
+     The second option is more efficient, and doesn't cost much, in terms of executable file bloat: there are only 4
+     routines that inline the primitive gcd_loop: add, mul, div, and gcd.
+     Note that div the inline_gcd embedded in div is dead code (the instructions are never executed), so a more optimized
+     version of prims.ml could cut the duplication down to only 3 places (add, mul, gcd).
+   *)
+  let inline_gcd =
+    ".gcd_loop:
+     and rdi, rdi
+     jz .end_gcd_loop
+     cqo
+     idiv rdi
+     mov rax, rdi
+     mov rdi, rdx
+     jmp .gcd_loop	
+     .end_gcd_loop:";;
 
   (* The arithmetic operation implementation is multi-tiered:
      - The low-level implementations of all operations are binary, e.g. (+ 1 2 3) and (+ 1) are not 
@@ -128,7 +154,8 @@ module Prims : PRIMS = struct
        and not 64 bits.
      - `lt.flt` does not handle NaN, +inf and -inf correctly. This allows us to use `return_boolean jl` for both the
        floating-point and the fraction cases. For a fully correct implementation, `lt.flt` should make use of
-       `return_boolean jb` instead (see https://www.felixcloutier.com/x86/ucomisd for more information).
+       the `ucomisd` opcode and `return_boolean jb` instead (see https://www.felixcloutier.com/x86/ucomisd for
+       more information).
    *)
   let numeric_ops =
     let numeric_op name flt_body rat_body body_wrapper =      
@@ -170,6 +197,23 @@ module Prims : PRIMS = struct
 	  NUMERATOR rsi, rsi
 	  NUMERATOR rdi, rdi
           " ^ rat_op ^ "
+	  mov rax, rcx
+	  mov rdi, rsi
+          " ^ inline_gcd ^ "
+	  mov rdi, rax
+	  mov rax, rsi
+	  cqo
+	  idiv rdi
+	  mov rsi, rax
+	  mov rax, rcx
+	  cqo
+	  idiv rdi
+	  mov rcx, rax
+          cmp rcx, 0
+          jge .make_rat
+          imul rsi, -1
+          imul rcx, -1
+          .make_rat:
           MAKE_RATIONAL(rax, rsi, rcx)") in
     let comp_map = [
         (* = *)
@@ -200,8 +244,8 @@ module Prims : PRIMS = struct
 	 FLOAT_VAL rdi, rdi
 	 movq xmm1, rdi
 	 cmpltpd xmm0, xmm1
-	 movq rsi, xmm0
-	 cmp rsi, 0", "lt";
+         movq rsi, xmm0
+         cmp rsi, 0", "lt";
       ] in
     let comparator comp_wrapper name flt_body rat_body = numeric_op name flt_body rat_body comp_wrapper in
     (String.concat "\n\n" (List.map (fun (a, b, c) -> arith c b a (fun x -> x)) arith_map)) ^
@@ -238,30 +282,30 @@ module Prims : PRIMS = struct
          MAKE_STRING rax, rsi, dil", make_binary, "make_string";
         
         "SYMBOL_VAL rsi, rsi
-        STRING_LENGTH rcx, rsi
-        STRING_ELEMENTS rdi, rsi
-        push rcx
-        push rdi
-        mov dil, byte [rdi]
-        MAKE_CHAR(rax, dil)
-        push rax
-        MAKE_RATIONAL(rax, rcx, 1)
-        push rax
-        push 2
-        push SOB_NIL_ADDRESS
-        call make_string
-        add rsp, 4*8
-        STRING_ELEMENTS rsi, rax   
-        pop rdi
-        pop rcx
-        cmp rcx, 0
-        je .end
-              .loop:
-        lea r8, [rdi+rcx]
-        lea r9, [rsi+rcx]
-        mov bl, byte [r8]
-        mov byte [r9], bl
-        loop .loop
+	 STRING_LENGTH rcx, rsi
+	 STRING_ELEMENTS rdi, rsi
+	 push rcx
+	 push rdi
+	 mov dil, byte [rdi]
+	 MAKE_CHAR(rax, dil)
+	 push rax
+	 MAKE_RATIONAL(rax, rcx, 1)
+	 push rax
+	 push 2
+	 push SOB_NIL_ADDRESS
+	 call make_string
+	 add rsp, 4*8
+	 STRING_ELEMENTS rsi, rax   
+	 pop rdi
+	 pop rcx
+	 cmp rcx, 0
+	 je .end
+         .loop:
+	 lea r8, [rdi+rcx]
+	 lea r9, [rsi+rcx]
+	 mov bl, byte [r8]
+	 mov byte [r9], bl
+	 loop .loop
          .end:", make_unary, "symbol_to_string";
 
         (* the identity predicate (i.e., address equality) *)
@@ -269,161 +313,146 @@ module Prims : PRIMS = struct
 
         (* type conversions *)
         "CHAR_VAL rsi, rsi
-        and rsi, 255
-        MAKE_RATIONAL(rax, rsi, 1)", make_unary, "char_to_integer";
+	 and rsi, 255
+	 MAKE_RATIONAL(rax, rsi, 1)", make_unary, "char_to_integer";
 
         "NUMERATOR rsi, rsi
-        and rsi, 255
-        MAKE_CHAR(rax, sil)", make_unary, "integer_to_char";
+	 and rsi, 255
+	 MAKE_CHAR(rax, sil)", make_unary, "integer_to_char";
 
         "DENOMINATOR rdi, rsi
-        NUMERATOR rsi, rsi 
-        cvtsi2sd xmm0, rsi
-        cvtsi2sd xmm1, rdi
-        divsd xmm0, xmm1
-        movq rsi, xmm0
-        MAKE_FLOAT(rax, rsi)", make_unary, "exact_to_inexact";
+	 NUMERATOR rsi, rsi 
+	 cvtsi2sd xmm0, rsi
+	 cvtsi2sd xmm1, rdi
+	 divsd xmm0, xmm1
+	 movq rsi, xmm0
+	 MAKE_FLOAT(rax, rsi)", make_unary, "exact_to_inexact";
 
         "NUMERATOR rsi, rsi
-        mov rdi, 1
-        MAKE_RATIONAL(rax, rsi, rdi)", make_unary, "numerator";
+	 mov rdi, 1
+	 MAKE_RATIONAL(rax, rsi, rdi)", make_unary, "numerator";
 
         "DENOMINATOR rsi, rsi
-        mov rdi, 1
-        MAKE_RATIONAL(rax, rsi, rdi)", make_unary, "denominator";
+	 mov rdi, 1
+	 MAKE_RATIONAL(rax, rsi, rdi)", make_unary, "denominator";
 
         (* GCD *)
         "xor rdx, rdx
-	      NUMERATOR rax, rsi
+	 NUMERATOR rax, rsi
          NUMERATOR rdi, rdi
-       .loop:
-        and rdi, rdi
-        jz .end_loop
-        xor rdx, rdx 
-        div rdi
-        mov rax, rdi
-        mov rdi, rdx
-        jmp .loop	
-          .end_loop:
-	        mov rdx, rax
+         " ^ inline_gcd ^ "
+	 mov rdx, rax
+         cmp rdx, 0
+         jge .make_result
+         neg rdx
+         .make_result:
          MAKE_RATIONAL(rax, rdx, 1)", make_binary, "gcd";
          
-         (* CAR *)
-         "CAR rax, rsi", make_unary, "car";
+        (* CAR *)
+        "CAR rax, rsi", make_unary, "car";
 
-         (* CDR *)
-         "CDR rax, rsi", make_unary, "cdr";
+        (* CDR *)
+        "CDR rax, rsi", make_unary, "cdr";
 
-         (* set-car! *)
-         "SET_CAR rsi, rdi
-         mov rax, SOB_VOID_ADDRESS", make_binary, "set_car";
+        (* set-car! *)
+        "SET_CAR rsi, rdi
+        mov rax, SOB_VOID_ADDRESS", make_binary, "set_car";
 
-         (* set-cdr! *)
-         "SET_CDR rsi, rdi
-         mov rax, SOB_VOID_ADDRESS", make_binary, "set_cdr";
+        (* set-cdr! *)
+        "SET_CDR rsi, rdi
+        mov rax, SOB_VOID_ADDRESS", make_binary, "set_cdr";
 
-         (* cons *)
-         "MAKE_PAIR(rax, rsi, rdi)", make_binary, "cons";
-
+        (* cons *)
+        "MAKE_PAIR(rax, rsi, rdi)", make_binary, "cons";
       ] in
     String.concat "\n\n" (List.map (fun (a, b, c) -> (b c a)) misc_parts);;
 
-    (* apply a1 ... ak s *)
-    (* TO DO:
-    reverse s
-    push all s
-    push ak ... a1
-    push env, ret
-    shift the stack of apply like in ApplicTP
-    jmp to code of proc *)
     let apply_code = 
-    "apply:
-    ;******************* APPLY *******************
-    push rbp
-    mov rbp, rsp
-    push SOB_NIL_ADDRESS      ; push MAGIC
-
-    mov rcx, NUM_OF_ARGS
-    dec rcx                   ; rcx = index of s
-    mov rcx, PVAR(rcx)        ; rcx = s
-    mov rdi, 0                ; rdi = will count the number of arguments we push along the way
-
-    ; reverse s
-    mov rbx, SOB_NIL_ADDRESS  ; rbx = reversed list
-    reverse_s:
-    cmp rcx, SOB_NIL_ADDRESS
-    je push_s_to_stack
-    CAR r8, rcx
-    CDR r9, rcx
-    mov rsi, rbx              ; rsi = temporarily hold the reversed list in rbx
-    MAKE_PAIR(rbx, r8, rsi)   ; add CAR as first element in reversed list
-    mov rcx, r9               ; rcx = CDR of s - get rid of first element we just added to reversed list
-    jmp reverse_s
-
-    push_s_to_stack:
-    cmp rbx, SOB_NIL_ADDRESS
-    je prepare_push_optional_args
-    CAR r8, rbx
-    CDR r9, rbx
-    push r8                   ; push CAR of reversed list
-    inc rdi                   ; rdi++ , to count number of arguments
-    mov rbx, r9               ; rbx = CDR of reversed list - get rid of first element we just pushed to the stack
-    jmp push_s_to_stack
-
-    prepare_push_optional_args:
-    mov rcx, NUM_OF_ARGS
-    sub rcx, 2                ; rcx = index of ak -> if ak exists. if not, it's the index of proc
-
-    push_optional_args:
-    cmp rcx, 0                ; index of proc. if there are no optional args - we stop immediately
-    je push_num_of_args
-    push PVAR(rcx)
-    inc rdi                   ; rdi++ , to count number of arguments
-    dec rcx
-    jmp push_optional_args
-
-    push_num_of_args:
-    push rdi                  ; push number of arguments
-
-    shift_the_stack:
-    mov r11, PVAR(0)          ; r11 = proc
-    CLOSURE_ENV rbx, r11
-    push rbx                  ; push env
-    push qword [rbp + WORD_SIZE]      ; push ret address of the function that called apply (this is because we do applicTP)
-    push qword [rbp]              ; push old rbp
-
-
-    mov rcx, rdi                   
-    add rcx, 5                    ; rcx = size of new frame
-    mov rax, NUM_OF_ARGS 
-    add rax, 5                    ; rax = size of old frame
-
-    mov rdx, rcx
-    sub rdx, rax                                          ; new frame size - old frame size
-    mov rsi, 1
-    shift_stack_apply_loop:
-    cmp rcx, 0
-    je end_of_shift_stack_apply_loop
-    dec rax
-    neg rsi
-    mov rdi, qword[rbp + rsi*WORD_SIZE]
-    neg rsi
-    mov qword[rbp + WORD_SIZE*rax], rdi
-    inc rsi
-    dec rcx
-    jmp shift_stack_apply_loop
-    end_of_shift_stack_apply_loop:
-    mov rax, WORD_SIZE
-    mul rdx
-    mov rsp,rbp
-    sub rsp, rax
-    pop rbp
-
-    jump_to_proc_code:
-    CLOSURE_CODE rbx, r11     ; assumes r11 still holds the closure of proc
-    jmp rbx"
-
-
+      "apply:
+      ;******************* APPLY *******************
+      push rbp
+      mov rbp, rsp
+      push SOB_NIL_ADDRESS      ; push MAGIC
+  
+      mov rcx, NUM_OF_ARGS
+      dec rcx                   ; rcx = index of s
+      mov rcx, PVAR(rcx)        ; rcx = s
+      mov rdi, 0                ; rdi = will count the number of arguments we push along the way
+  
+      ; reverse s
+      mov rbx, SOB_NIL_ADDRESS  ; rbx = reversed list
+      reverse_s:
+      cmp rcx, SOB_NIL_ADDRESS
+      je push_s_to_stack
+      CAR r8, rcx
+      CDR r9, rcx
+      mov rsi, rbx              ; rsi = temporarily hold the reversed list in rbx
+      MAKE_PAIR(rbx, r8, rsi)   ; add CAR as first element in reversed list
+      mov rcx, r9               ; rcx = CDR of s - get rid of first element we just added to reversed list
+      jmp reverse_s
+  
+      push_s_to_stack:
+      cmp rbx, SOB_NIL_ADDRESS
+      je prepare_push_optional_args
+      CAR r8, rbx
+      CDR r9, rbx
+      push r8                   ; push CAR of reversed list
+      inc rdi                   ; rdi++ , to count number of arguments
+      mov rbx, r9               ; rbx = CDR of reversed list - get rid of first element we just pushed to the stack
+      jmp push_s_to_stack
+  
+      prepare_push_optional_args:
+      mov rcx, NUM_OF_ARGS
+      sub rcx, 2                ; rcx = index of ak -> if ak exists. if not, it's the index of proc
+  
+      push_optional_args:
+      cmp rcx, 0                ; index of proc. if there are no optional args - we stop immediately
+      je push_num_of_args
+      push PVAR(rcx)
+      inc rdi                   ; rdi++ , to count number of arguments
+      dec rcx
+      jmp push_optional_args
+  
+      push_num_of_args:
+      push rdi                  ; push number of arguments
+  
+      shift_the_stack:
+      mov r11, PVAR(0)          ; r11 = proc
+      CLOSURE_ENV rbx, r11
+      push rbx                  ; push env
+      push qword [rbp + WORD_SIZE]      ; push ret address of the function that called apply (this is because we do applicTP)
+      push qword [rbp]              ; push old rbp
+  
+  
+      mov rcx, rdi                   
+      add rcx, 5                    ; rcx = size of new frame
+      mov rax, NUM_OF_ARGS 
+      add rax, 5                    ; rax = size of old frame
+  
+      mov rdx, rcx
+      sub rdx, rax                                          ; new frame size - old frame size
+      mov rsi, 1
+      shift_stack_apply_loop:
+      cmp rcx, 0
+      je end_of_shift_stack_apply_loop
+      dec rax
+      neg rsi
+      mov rdi, qword[rbp + rsi*WORD_SIZE]
+      neg rsi
+      mov qword[rbp + WORD_SIZE*rax], rdi
+      inc rsi
+      dec rcx
+      jmp shift_stack_apply_loop
+      end_of_shift_stack_apply_loop:
+      mov rax, WORD_SIZE
+      mul rdx
+      mov rsp,rbp
+      sub rsp, rax
+      pop rbp
+  
+      jump_to_proc_code:
+      CLOSURE_CODE rbx, r11     ; assumes r11 still holds the closure of proc
+      jmp rbx"
 
   (* This is the interface of the module. It constructs a large x86 64-bit string using the routines
      defined above. The main compiler pipline code (in compiler.ml) calls into this module to get the

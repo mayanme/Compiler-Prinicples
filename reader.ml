@@ -290,22 +290,22 @@ let rec list_parser s =
   and quote_like_form s = PC.disj_list [quote_parser; quasiquote_parser; unquote_parser; unquote_splicing_parser ] s
 
   and quote_parser s = 
-    let quoted_expr = PC.caten quote sexpr_parser in
+    let quoted_expr = PC.caten quote (sexprs_list_with_ignored sexpr_parser) in
     PC.pack quoted_expr ( fun (sign, sexpr) -> 
       Pair(Symbol("quote"),Pair(sexpr, Nil))) s
 
   and quasiquote_parser s = 
-    let quasiquoted_expr = PC.caten quasiquote sexpr_parser in
+    let quasiquoted_expr = PC.caten quasiquote (sexprs_list_with_ignored sexpr_parser) in
     PC.pack quasiquoted_expr ( fun (sign, sexpr) -> 
       Pair(Symbol("quasiquote"),Pair(sexpr, Nil))) s
   
   and unquote_parser s = 
-    let unquoted_expr = PC.caten unquote sexpr_parser in
+    let unquoted_expr = PC.caten unquote (sexprs_list_with_ignored sexpr_parser) in
     PC.pack unquoted_expr ( fun (sign, sexpr) -> 
       Pair(Symbol("unquote"),Pair(sexpr, Nil))) s
   
   and unquote_splicing_parser s = 
-    let unquote_spliced_expr = PC.caten unquote_splicing sexpr_parser in
+    let unquote_spliced_expr = PC.caten unquote_splicing (sexprs_list_with_ignored sexpr_parser) in
     PC.pack unquote_spliced_expr ( fun (sign, sexpr) -> 
       Pair(Symbol("unquote-splicing"),Pair(sexpr, Nil))) s ;;
 
@@ -316,46 +316,3 @@ let rec get_sexprs_list s =
 
 let read_sexprs string = get_sexprs_list (string_to_list string);;  
 end;; (* struct Reader *)
-
-
-(* 
-((lambda s 
-((lambda s 
-((lambda s 
-((lambda s 
-((lambda s 
-((lambda s 
-((lambda s 
-((lambda s 
-((lambda s 
-((lambda s 
-((lambda s 
-((lambda s 
-((lambda s 
-((lambda s 
-((lambda s 
-((lambda s 
-((lambda s 
-((lambda s 
-((lambda s 
-((lambda s s) s)) s)) s)) s)) s)) s)) s)) s)) s)) s)) s)) s)) s)) s)) s)) s)) s)) s)) s)) 'mary 'had 'a 'little 'lambda)
-
-
-((lambda s 
-((lambda s 
-((lambda s 
-((lambda s 
-((lambda s 
-((lambda s s) s)) s)) s)) s)) s)) 'mary 'had 'a 'little 'lambda) *)
-
-    (* let nt = caten (caten tok_lparen (star (sexprs_list_with_ignored sexpr_parser))) tok_rparen in
-    let nt = PC.pack nt (fun ((l,exp_list),r) -> List.fold_right (fun a b -> Pair(a,b)) exp_list Nil ) in
-      nt s
-
-    and improper_list s =
-    let nt = pack (PC.caten tok_lparen (PC.plus (sexprs_list_with_ignored sexpr_parser))) (fun (l,exp) -> exp) in
-    let nt = pack (caten nt (char '.')) (fun (exp1,dot) -> exp1) in
-    let nt = pack (caten nt (sexprs_list_with_ignored sexpr_parser)) (fun (exp1,exp2) -> (exp1,exp2)) in
-    let nt = pack (caten nt tok_rparen) (fun ((exp1,exp2),r) -> (exp1,exp2)) in
-    let nt = pack nt (fun (exp1,exp2) -> List.fold_right (fun a b -> Pair(a,b)) exp1 exp2) in
-    nt s *)
